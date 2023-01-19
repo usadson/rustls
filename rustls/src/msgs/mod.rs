@@ -12,7 +12,6 @@ pub mod deframer;
 pub mod enums;
 pub mod fragmenter;
 pub mod handshake;
-pub mod hsjoiner;
 pub mod message;
 pub mod persist;
 
@@ -30,8 +29,6 @@ mod message_test;
 
 #[cfg(test)]
 mod test {
-    use std::convert::TryFrom;
-
     #[test]
     fn smoketest() {
         use super::codec::Reader;

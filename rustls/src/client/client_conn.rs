@@ -20,7 +20,6 @@ use super::hs;
 #[cfg(feature = "quic")]
 use crate::quic;
 
-use std::convert::TryFrom;
 use std::error::Error as StdError;
 use std::marker::PhantomData;
 use std::net::IpAddr;
@@ -177,11 +176,10 @@ impl ClientConfig {
         }
     }
 
-    #[doc(hidden)]
     /// We support a given TLS version if it's quoted in the configured
     /// versions *and* at least one ciphersuite for this version is
     /// also configured.
-    pub fn supports_version(&self, v: ProtocolVersion) -> bool {
+    pub(crate) fn supports_version(&self, v: ProtocolVersion) -> bool {
         self.versions.contains(v)
             && self
                 .cipher_suites
@@ -216,7 +214,6 @@ impl ClientConfig {
 /// so you can do:
 ///
 /// ```
-/// # use std::convert::{TryInto, TryFrom};
 /// # use rustls::ServerName;
 /// ServerName::try_from("example.com").expect("invalid DNS name");
 ///
@@ -320,6 +317,7 @@ pub(super) mod danger {
 
     /// Accessor for dangerous configuration options.
     #[derive(Debug)]
+    #[cfg_attr(docsrs, doc(cfg(feature = "dangerous_configuration")))]
     pub struct DangerousClientConfig<'a> {
         /// The underlying ClientConfig
         pub cfg: &'a mut ClientConfig,
@@ -636,6 +634,7 @@ impl quic::QuicExt for ClientConnection {
 
 /// Methods specific to QUIC client sessions
 #[cfg(feature = "quic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
 pub trait ClientQuicExt {
     /// Make a new QUIC ClientConnection. This differs from `ClientConnection::new()`
     /// in that it takes an extra argument, `params`, which contains the

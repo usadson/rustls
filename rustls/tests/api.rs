@@ -1,8 +1,5 @@
 //! Assorted public API tests.
 use std::cell::RefCell;
-use std::convert::TryFrom;
-#[cfg(feature = "tls12")]
-use std::convert::TryInto;
 use std::fmt;
 use std::io::{self, IoSlice, Read, Write};
 use std::mem;
@@ -3145,7 +3142,7 @@ mod test_quic {
         assert!(step(&mut server, &mut client).is_err());
         assert_eq!(
             client.alert(),
-            Some(rustls::internal::msgs::enums::AlertDescription::BadCertificate)
+            Some(rustls::AlertDescription::BadCertificate)
         );
 
         // Key updates
@@ -3202,7 +3199,7 @@ mod test_quic {
 
             assert_eq!(
                 server.alert(),
-                Some(rustls::internal::msgs::enums::AlertDescription::NoApplicationProtocol)
+                Some(rustls::AlertDescription::NoApplicationProtocol)
             );
         }
     }
@@ -3399,6 +3396,7 @@ mod test_quic {
     #[test]
     fn packet_key_api() {
         use rustls::quic::{Keys, Version};
+        use rustls::Side;
 
         // Test vectors: https://www.rfc-editor.org/rfc/rfc9001.html#name-client-initial
         const CONNECTION_ID: &[u8] = &[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
@@ -3429,7 +3427,7 @@ mod test_quic {
             0x08, 0x06, 0x04, 0x80, 0x00, 0xff, 0xff,
         ];
 
-        let client_keys = Keys::initial(Version::V1, &CONNECTION_ID, true);
+        let client_keys = Keys::initial(Version::V1, &CONNECTION_ID, Side::Client);
         assert_eq!(
             client_keys
                 .local
@@ -3565,7 +3563,7 @@ mod test_quic {
         let (first, rest) = header.split_at_mut(1);
         let sample = &payload[..sample_len];
 
-        let server_keys = Keys::initial(Version::V1, &CONNECTION_ID, false);
+        let server_keys = Keys::initial(Version::V1, &CONNECTION_ID, Side::Server);
         server_keys
             .remote
             .header
@@ -4065,9 +4063,7 @@ fn test_acceptor() {
     );
     assert_eq!(
         acceptor.accept().err(),
-        Some(Error::General(
-            "cannot accept after successful acceptance".into()
-        ))
+        Some(Error::General("Acceptor polled after completion".into()))
     );
 
     let mut acceptor = Acceptor::default();
@@ -4346,12 +4342,17 @@ fn test_received_plaintext_backpressure() {
     let sent = dbg!(client
         .write_tls(&mut network_buf)
         .unwrap());
-    assert_eq!(
-        sent,
-        dbg!(server
-            .read_tls(&mut &network_buf[..sent])
-            .unwrap())
-    );
+    let mut read = 0;
+    while read < sent {
+        let new = dbg!(server
+            .read_tls(&mut &network_buf[read..sent])
+            .unwrap());
+        if new == 4096 {
+            read += new;
+        } else {
+            break;
+        }
+    }
     server.process_new_packets().unwrap();
 
     // Send two more bytes from client to server

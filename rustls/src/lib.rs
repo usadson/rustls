@@ -133,7 +133,6 @@
 //! # use rustls;
 //! # use webpki;
 //! # use std::sync::Arc;
-//! # use std::convert::TryInto;
 //! # let mut root_store = rustls::RootCertStore::empty();
 //! # root_store.add_server_trust_anchors(
 //! #  webpki_roots::TLS_SERVER_ROOTS
@@ -357,6 +356,10 @@ pub mod internal {
     pub mod cipher {
         pub use crate::cipher::MessageDecrypter;
     }
+    /// Low-level TLS record layer functions.
+    pub mod record_layer {
+        pub use crate::record_layer::{Decrypted, RecordLayer};
+    }
 }
 
 // The public interface is:
@@ -365,7 +368,7 @@ pub use crate::builder::{
     ConfigBuilder, ConfigSide, WantsCipherSuites, WantsKxGroups, WantsVerifier, WantsVersions,
 };
 pub use crate::conn::{
-    CommonState, Connection, ConnectionCommon, IoState, Reader, SideData, Writer,
+    CommonState, Connection, ConnectionCommon, IoState, Reader, Side, SideData, Writer,
 };
 pub use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 pub use crate::error::Error;
@@ -402,7 +405,6 @@ pub mod client {
 
     pub use builder::{WantsClientCert, WantsTransparencyPolicyOrClientCert};
     #[cfg(feature = "quic")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
     pub use client_conn::ClientQuicExt;
     pub use client_conn::InvalidDnsNameError;
     pub use client_conn::ResolvesClientCert;
@@ -412,13 +414,11 @@ pub mod client {
     pub use handy::{ClientSessionMemoryCache, NoClientSessionStorage};
 
     #[cfg(feature = "dangerous_configuration")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "dangerous_configuration")))]
     pub use crate::verify::{
         CertificateTransparencyPolicy, HandshakeSignatureValid, ServerCertVerified,
         ServerCertVerifier, WebPkiVerifier,
     };
     #[cfg(feature = "dangerous_configuration")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "dangerous_configuration")))]
     pub use client_conn::danger::DangerousClientConfig;
 }
 
@@ -442,7 +442,6 @@ pub mod server {
     pub use handy::ResolvesServerCertUsingSni;
     pub use handy::{NoServerSessionStorage, ServerSessionMemoryCache};
     #[cfg(feature = "quic")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
     pub use server_conn::ServerQuicExt;
     pub use server_conn::StoresServerSessions;
     pub use server_conn::{
@@ -451,7 +450,6 @@ pub mod server {
     pub use server_conn::{ClientHello, ProducesTickets, ResolvesServerCert};
 
     #[cfg(feature = "dangerous_configuration")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "dangerous_configuration")))]
     pub use crate::verify::{ClientCertVerified, ClientCertVerifier, DnsName};
 }
 
@@ -515,7 +513,6 @@ pub mod manual;
 pub type ResolvesServerCertUsingSNI = server::ResolvesServerCertUsingSni;
 #[allow(clippy::upper_case_acronyms)]
 #[cfg(feature = "dangerous_configuration")]
-#[cfg_attr(docsrs, doc(cfg(feature = "dangerous_configuration")))]
 #[doc(hidden)]
 #[deprecated(since = "0.20.0", note = "Use client::WebPkiVerifier")]
 pub type WebPKIVerifier = client::WebPkiVerifier;

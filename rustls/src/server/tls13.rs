@@ -1,4 +1,6 @@
 use crate::check::inappropriate_handshake_message;
+#[cfg(feature = "secret_extraction")]
+use crate::conn::Side;
 use crate::conn::{CommonState, ConnectionRandoms, State};
 use crate::enums::ProtocolVersion;
 use crate::error::Error;
@@ -16,14 +18,14 @@ use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
 use crate::rand;
 use crate::server::ServerConfig;
+#[cfg(feature = "secret_extraction")]
+use crate::suites::PartiallyExtractedSecrets;
 use crate::ticketer;
 use crate::tls13::key_schedule::{KeyScheduleTraffic, KeyScheduleTrafficWithClientFinishedPending};
 use crate::tls13::Tls13CipherSuite;
 use crate::verify;
 #[cfg(feature = "quic")]
 use crate::{check::inappropriate_message, conn::Protocol};
-#[cfg(feature = "secret_extraction")]
-use crate::{conn::Side, suites::PartiallyExtractedSecrets};
 
 use super::hs::{self, HandshakeHashOrBuffer, ServerContext};
 use super::server_conn::ServerConnectionData;
@@ -56,8 +58,6 @@ mod client_hello {
     use crate::msgs::handshake::ServerExtension;
     use crate::msgs::handshake::ServerHelloPayload;
     use crate::msgs::handshake::SessionID;
-    #[cfg(feature = "quic")]
-    use crate::quic;
     use crate::server::common::ActiveCertifiedKey;
     use crate::sign;
     use crate::tls13::key_schedule::{
@@ -117,7 +117,7 @@ mod client_hello {
                 .transcript
                 .get_hash_given(&binder_plaintext);
 
-            let key_schedule = KeyScheduleEarly::new(suite.hkdf_algorithm, psk);
+            let key_schedule = KeyScheduleEarly::new(suite, psk);
             let real_binder =
                 key_schedule.resumption_psk_binder_key_and_sign_verify_data(&handshake_hash);
 
@@ -377,23 +377,15 @@ mod client_hello {
             // are encrypted with the handshake keys.
             match doing_early_data {
                 EarlyDataDecision::Disabled => {
-                    cx.common
-                        .record_layer
-                        .set_message_decrypter(
-                            self.suite
-                                .derive_decrypter(key_schedule.client_key()),
-                        );
+                    key_schedule.set_handshake_decrypter(None, cx.common);
                     cx.data.early_data.reject();
                 }
                 EarlyDataDecision::RequestedButRejected => {
                     debug!("Client requested early_data, but not accepted: switching to handshake keys with trial decryption");
-                    cx.common
-                        .record_layer
-                        .set_message_decrypter_with_trial_decryption(
-                            self.suite
-                                .derive_decrypter(key_schedule.client_key()),
-                            max_early_data_size(self.config.max_early_data_size),
-                        );
+                    key_schedule.set_handshake_decrypter(
+                        Some(max_early_data_size(self.config.max_early_data_size)),
+                        cx.common,
+                    );
                     cx.data.early_data.reject();
                 }
                 EarlyDataDecision::Accepted => {
@@ -406,7 +398,6 @@ mod client_hello {
             cx.common.check_aligned_handshake()?;
             let key_schedule_traffic = emit_finished_tls13(
                 &mut self.transcript,
-                self.suite,
                 &self.randoms,
                 cx,
                 key_schedule,
@@ -501,20 +492,18 @@ mod client_hello {
         cx.common.send_msg(sh, false);
 
         // Start key schedule
-        let (key_schedule_pre_handshake, early_data_client_key) = if let Some(psk) = resuming_psk {
-            let early_key_schedule = KeyScheduleEarly::new(suite.hkdf_algorithm, psk);
-            let client_early_traffic_secret = early_key_schedule.client_early_traffic_secret(
+        let key_schedule_pre_handshake = if let Some(psk) = resuming_psk {
+            let early_key_schedule = KeyScheduleEarly::new(suite, psk);
+            early_key_schedule.client_early_traffic_secret(
                 &client_hello_hash,
                 &*config.key_log,
                 &randoms.client,
+                cx.common,
             );
 
-            (
-                KeySchedulePreHandshake::from(early_key_schedule),
-                Some(client_early_traffic_secret),
-            )
+            KeySchedulePreHandshake::from(early_key_schedule)
         } else {
-            (KeySchedulePreHandshake::new(suite.hkdf_algorithm), None)
+            KeySchedulePreHandshake::new(suite)
         };
 
         // Do key exchange
@@ -523,33 +512,12 @@ mod client_hello {
         })?;
 
         let handshake_hash = transcript.get_current_hash();
-        let (key_schedule, _client_key, server_key) = key_schedule.derive_handshake_secrets(
+        let key_schedule = key_schedule.derive_server_handshake_secrets(
             handshake_hash,
             &*config.key_log,
             &randoms.client,
+            cx.common,
         );
-
-        // Set up to encrypt with handshake secrets, but decrypt with early_data keys.
-        // If not doing early_data after all, this is corrected later to the handshake
-        // keys (now stored in key_schedule).
-        cx.common
-            .record_layer
-            .set_message_encrypter(suite.derive_encrypter(&server_key));
-
-        if let Some(key) = &early_data_client_key {
-            cx.common
-                .record_layer
-                .set_message_decrypter(suite.derive_decrypter(key));
-        }
-
-        #[cfg(feature = "quic")]
-        if cx.common.is_quic() {
-            // If 0-RTT should be rejected, this will be clobbered by ExtensionProcessing
-            // before the application can see.
-            cx.common.quic.early_secret = early_data_client_key;
-            cx.common.quic.hs_secrets =
-                Some(quic::Secrets::new(_client_key, server_key, suite, false));
-        }
 
         Ok(key_schedule)
     }
@@ -831,7 +799,6 @@ mod client_hello {
 
     fn emit_finished_tls13(
         transcript: &mut HandshakeHash,
-        suite: &'static Tls13CipherSuite,
         randoms: &ConnectionRandoms,
         cx: &mut ServerContext<'_>,
         key_schedule: KeyScheduleHandshake,
@@ -856,23 +823,12 @@ mod client_hello {
 
         // Now move to application data keys.  Read key change is deferred until
         // the Finish message is received & validated.
-        let (key_schedule_traffic, _client_key, server_key) = key_schedule
-            .into_traffic_with_client_finished_pending(
-                hash_at_server_fin,
-                &*config.key_log,
-                &randoms.client,
-            );
-        cx.common
-            .record_layer
-            .set_message_encrypter(suite.derive_encrypter(&server_key));
-
-        #[cfg(feature = "quic")]
-        {
-            cx.common.quic.traffic_secrets =
-                Some(quic::Secrets::new(_client_key, server_key, suite, false));
-        }
-
-        key_schedule_traffic
+        key_schedule.into_traffic_with_client_finished_pending(
+            hash_at_server_fin,
+            &*config.key_log,
+            &randoms.client,
+            cx.common,
+        )
     }
 }
 
@@ -1062,13 +1018,8 @@ impl State<ServerConnectionData> for ExpectEarlyData {
                     },
                 ..
             } => {
-                cx.common
-                    .record_layer
-                    .set_message_decrypter(
-                        self.suite
-                            .derive_decrypter(self.key_schedule.client_key()),
-                    );
-
+                self.key_schedule
+                    .update_decrypter(cx.common);
                 self.transcript.add_message(&m);
                 Ok(Box::new(ExpectFinished {
                     config: self.config,
@@ -1196,9 +1147,9 @@ impl State<ServerConnectionData> for ExpectFinished {
             require_handshake_msg!(m, HandshakeType::Finished, HandshakePayload::Finished)?;
 
         let handshake_hash = self.transcript.get_current_hash();
-        let (key_schedule_traffic, expect_verify_data, client_key) = self
+        let (key_schedule_traffic, expect_verify_data) = self
             .key_schedule
-            .sign_client_finish(&handshake_hash);
+            .sign_client_finish(&handshake_hash, cx.common);
 
         let fin = constant_time::verify_slices_are_equal(expect_verify_data.as_ref(), &finished.0)
             .map_err(|_| {
@@ -1214,12 +1165,6 @@ impl State<ServerConnectionData> for ExpectFinished {
         self.transcript.add_message(&m);
 
         cx.common.check_aligned_handshake()?;
-
-        // Install keying to read future messages.
-        cx.common
-            .record_layer
-            .set_message_decrypter(self.suite.derive_decrypter(&client_key));
-
         if self.send_ticket {
             Self::emit_ticket(
                 &mut self.transcript,
@@ -1244,7 +1189,6 @@ impl State<ServerConnectionData> for ExpectFinished {
         }
 
         Ok(Box::new(ExpectTraffic {
-            suite: self.suite,
             key_schedule: key_schedule_traffic,
             want_write_key_update: false,
             _fin_verified: fin,
@@ -1254,7 +1198,6 @@ impl State<ServerConnectionData> for ExpectFinished {
 
 // --- Process traffic ---
 struct ExpectTraffic {
-    suite: &'static Tls13CipherSuite,
     key_schedule: KeyScheduleTraffic,
     want_write_key_update: bool,
     _fin_verified: verify::FinishedMessageVerified,
@@ -1290,16 +1233,8 @@ impl ExpectTraffic {
         }
 
         // Update our read-side keys.
-        let new_read_key = self
-            .key_schedule
-            .next_client_application_traffic_secret();
-        common
-            .record_layer
-            .set_message_decrypter(
-                self.suite
-                    .derive_decrypter(&new_read_key),
-            );
-
+        self.key_schedule
+            .update_decrypter(common);
         Ok(())
     }
 }
@@ -1343,21 +1278,15 @@ impl State<ServerConnectionData> for ExpectTraffic {
     fn perhaps_write_key_update(&mut self, common: &mut CommonState) {
         if self.want_write_key_update {
             self.want_write_key_update = false;
-            common.send_msg_encrypt(Message::build_key_update_notify().into());
-
-            let write_key = self
-                .key_schedule
-                .next_server_application_traffic_secret();
-            common
-                .record_layer
-                .set_message_encrypter(self.suite.derive_encrypter(&write_key));
+            self.key_schedule
+                .update_encrypter_and_notify(common);
         }
     }
 
     #[cfg(feature = "secret_extraction")]
     fn extract_secrets(&self) -> Result<PartiallyExtractedSecrets, Error> {
         self.key_schedule
-            .extract_secrets(self.suite.common.aead_algorithm, Side::Server)
+            .extract_secrets(Side::Server)
     }
 }
 

@@ -20,13 +20,20 @@ If you'd like to help out, please see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Release history
 
-* Next release
+* Future release
   - Planned: removal of unused signature verification schemes at link-time.
-* 0.20.8 (TBD)
+  - Planned: removal of unused protocol versions at link-time.
+* Next release: 0.21.0 (2023-xx-xx)
+  - Support for connecting to peers named with IP addresses.  This means
+    rustls now depends on a fork of webpki - `rustls-webpki` - with a suitably
+    extended API.
+* 0.20.8 (2023-01-12)
   - Yield an error from `ConnectionCommon::read_tls()` if buffers are full.
     Both a full deframer buffer and a full incoming plaintext buffer will
     now cause an error to be returned. Callers should call `process_new_packets()`
-    and read out the `writer()` after each successful call to `read_tls()`.
+    and read out the plaintext data from `reader()` after each successful call to `read_tls()`.
+  - The minimum supported Rust version is now 1.57.0 due to some dependencies
+    requiring it.
 * 0.20.7 (2022-10-18)
   - Expose secret extraction API under the `secret_extraction` cargo feature.
     This is designed to enable switching from rustls to kTLS (kernel TLS
